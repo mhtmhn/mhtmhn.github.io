@@ -8,7 +8,7 @@
 // laptop; the page opens it with the pairing's key.
 'use strict'
 
-const VERSION = '3.3'
+const VERSION = '3.4'
 const WORKER = 'https://claude-status.mohitsandroid.workers.dev'
 const ABLY_REST = 'https://main.realtime.ably.net'
 const COOKIE = 'ccstatus_pair'
@@ -65,8 +65,7 @@ async function loadPairing() {
   const fromLink = CCS.parseLink(location.hash)
   if (location.hash) history.replaceState(null, '', location.pathname)
   if (fromLink) {
-    await CCS.set('pairing', fromLink)
-    document.cookie = `${COOKIE}=${encodeURIComponent(JSON.stringify(fromLink))}; Max-Age=${2 * 86400}; Path=/ccstatus/; Secure; SameSite=Strict`
+    await savePairing(fromLink)
     log('paired from the link')
     return fromLink
   }
@@ -85,6 +84,140 @@ async function loadPairing() {
   }
   return null
 }
+
+async function savePairing(p) {
+  await CCS.set('pairing', p)
+  document.cookie = `${COOKIE}=${encodeURIComponent(JSON.stringify(p))}; Max-Age=${2 * 86400}; Path=/ccstatus/; Secure; SameSite=Strict`
+}
+
+// ---------------------------------------------------------------- pairing by camera
+
+// The installed iOS app shares no storage with Safari after it is added, so
+// a code scanned with the Camera app never reaches it. Scanning here pairs
+// the app itself. jsQR is loaded on the first tap only.
+let scanStream = null
+let scanning = false
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script')
+    el.src = src
+    el.onload = resolve
+    el.onerror = () => reject(new Error('could not load the scanner'))
+    document.head.append(el)
+  })
+}
+
+function scanProblem(text) {
+  $('scanProblem').textContent = text || ''
+  $('scanProblem').hidden = !text
+}
+
+function stopScan() {
+  scanning = false
+  scanStream?.getTracks().forEach(t => t.stop())
+  scanStream = null
+  $('scanVideo').srcObject = null
+  $('scanner').hidden = true
+}
+
+async function startScan() {
+  scanProblem('')
+  if (!navigator.mediaDevices?.getUserMedia) {
+    scanProblem('This browser cannot use the camera. Open the pairing link from /ccstatus instead.')
+    return
+  }
+  // Ask for the camera inside the tap, before anything slow: iOS ties the
+  // permission prompt to the gesture.
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+  } catch (err) {
+    log('camera: ' + err.name)
+    scanProblem(err.name === 'NotAllowedError'
+      ? 'Camera access is off for this app. Turn it on in Settings, then try again.'
+      : 'The camera could not start (' + err.name + ').')
+    return
+  }
+  const video = $('scanVideo')
+  video.srcObject = scanStream
+  $('scanner').hidden = false
+  try {
+    if (!window.jsQR) await loadScript('vendor/jsqr-1.4.0.js')
+    await video.play()
+  } catch (err) {
+    stopScan()
+    scanProblem('The scanner could not start: ' + err.message)
+    return
+  }
+  scanning = true
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  let warned = 0
+  const tick = async () => {
+    if (!scanning) return
+    if (video.readyState >= 2 && video.videoWidth) {
+      // A centred square at most 720 px: enough for a terminal QR, cheap to scan.
+      const side = Math.min(video.videoWidth, video.videoHeight)
+      const size = Math.min(side, 720)
+      canvas.width = canvas.height = size
+      ctx.drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, size, size)
+      const code = jsQR(ctx.getImageData(0, 0, size, size).data, size, size, { inversionAttempts: 'attemptBoth' })
+      if (code) {
+        const p = linkPairing(code.data)
+        if (p) {
+          stopScan()
+          await pairWith(p)
+          return
+        }
+        if (Date.now() - warned > 3000) { warned = Date.now(); log('scanned a code that is not a pairing link') }
+      }
+    }
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+}
+
+// Only a link to this app counts, so another site's QR is never taken as a pairing.
+function linkPairing(text) {
+  try {
+    const u = new URL(String(text).trim())
+    if (u.origin !== location.origin || !u.pathname.startsWith('/ccstatus')) return null
+    return CCS.parseLink(u.hash)
+  } catch {
+    return null
+  }
+}
+
+async function pairWith(p) {
+  if (client) { try { client.close() } catch {} client = null }
+  sessions.clear()
+  await savePairing(p)
+  pairing = p
+  log('paired by scanning')
+  $('welcome').querySelector('h2').textContent = 'Pair with Claude Code'
+  $('welcome').hidden = true
+  problem('')
+  connect()
+  fetchVapidKey().catch(err => log('push key: ' + err.message))
+  renderNotify()
+  render()
+}
+
+// The token service no longer knows this pairing (unpaired on the computer,
+// expired, or a stale code): offer the scanner again instead of a dead end.
+function showRepair() {
+  if (!$('welcome').hidden) return
+  if (client) { try { client.close() } catch {} }
+  $('welcome').querySelector('h2').textContent = 'Pair again'
+  $('welcomeText').textContent = 'This pairing is no longer valid. Run /ccstatus on your computer, then scan its new code.'
+  $('welcome').hidden = false
+  $('view').hidden = true
+  problem('')
+}
+
+$('scanBtn').onclick = startScan
+$('scanCancel').onclick = stopScan
+document.addEventListener('visibilitychange', () => { if (document.hidden && scanning) stopScan() })
 
 async function unpair() {
   if (!confirm('Unpair this phone? It stops showing status and notifications until you scan a new code.')) return
@@ -204,7 +337,7 @@ function connect() {
   client = new Ably.Realtime({
     authCallback: (_params, cb) => {
       fetchToken().then(t => cb(null, t), err => {
-        if (err.unpaired) problem(err.message)
+        if (err.unpaired) showRepair()
         log('token: ' + err.message)
         cb(err.message, null)
       })
@@ -405,9 +538,6 @@ navigator.serviceWorker?.addEventListener('message', e => {
   log('start: ' + (isIOS ? 'iOS' : 'other') + ', ' + (isStandalone ? 'installed' : 'browser') + ', ' + (pairing ? 'paired' : 'not paired'))
   if (!pairing) {
     $('welcome').hidden = false
-    if (isStandalone && isIOS) {
-      $('welcome').querySelector('p').textContent = 'Scan the QR code /ccstatus shows with the Camera, open it in Safari, then reopen this app.'
-    }
   } else {
     connect()
     fetchVapidKey().catch(err => log('push key: ' + err.message))

@@ -92,3 +92,14 @@ footer { text-align: center; margin-top: 1rem; }
 .chip .ci { display: inline-flex; width: 1.3em; height: 1.3em; }
 .chip .ci svg { width: 100%; height: 100%; fill: currentColor; }
 .chip .ci svg[fill="none"] { fill: none; }
+
+/* Pairing by camera. */
+.problem.small { font-size: .9rem; margin: .7rem 0 0; }
+.scanner { position: fixed; inset: 0; z-index: 20; background: #000; display: flex; align-items: center; justify-content: center; }
+.scanner video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.scan-frame { position: relative; width: min(72vw, 20rem); aspect-ratio: 1; border-radius: 22px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .45); outline: 3px solid rgba(255, 255, 255, .9); outline-offset: -3px; }
+.scan-hint { position: absolute; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 1.5rem); margin: 0 1.5rem;
+  text-align: center; color: #fff; font-weight: 500; text-shadow: 0 1px 3px #000; }
+.scan-cancel { position: absolute; bottom: calc(env(safe-area-inset-bottom) + 1.5rem); left: 50%; transform: translateX(-50%);
+  padding: .75rem 2rem; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .92); color: #000; font-weight: 600; }
