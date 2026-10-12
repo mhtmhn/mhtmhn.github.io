@@ -5,7 +5,9 @@
 // not send it to the server).
 'use strict'
 
-const VERSION = 'p1.2'
+const VERSION = 'p1.3'
+// Ably's REST endpoint, as ably-js 2.x names its primary host.
+const ABLY_REST = 'https://main.realtime.ably.net'
 const $ = id => document.getElementById(id)
 const STORE = 'ccstatus.pairing'
 const COOKIE = 'ccstatus_pairing'
@@ -158,9 +160,32 @@ function connect(p) {
 }
 
 // iOS only shows the permission prompt for a request made in the tap
-// itself: Notification.requestPermission() is the first thing this does,
-// before any await. Ably's activate() asks again later, which then resolves
-// at once with the answer already given.
+// itself, and answers "denied" to any later request made outside one, even
+// after the person tapped Allow. Ably's own activate() asks for permission
+// again after a network round trip, so on iOS it always failed. Here the
+// whole browser half of web push runs from the tap, and Ably is handed the
+// finished subscription (activatePush): it never asks.
+
+function urlB64ToBytes(s) {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4))
+  return Uint8Array.from(b, c => c.charCodeAt(0))
+}
+
+function bytesToB64(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+}
+
+// The VAPID public key Ably made for this app, fetched before any tap so the
+// tap has nothing to wait for. Any valid token may read it.
+let vapidKey = null
+async function fetchVapidKey(p) {
+  const res = await fetch(ABLY_REST + '/push/publicVapidKey', {
+    headers: { authorization: 'Bearer ' + btoa(p.t), accept: 'text/plain' },
+  })
+  if (!res.ok) throw new Error('VAPID key: HTTP ' + res.status)
+  vapidKey = (await res.text()).trim().replace(/^"|"$/g, '')
+}
+
 function turnOnPush(p) {
   const btn = $('notifyBtn')
   btn.disabled = true
@@ -173,19 +198,42 @@ function turnOnPush(p) {
     btn.disabled = false
     return
   }
-  Promise.resolve(asked).then(perm => {
+  Promise.resolve(asked).then(async perm => {
     log('Permission: ' + perm, perm === 'granted' ? 'ok' : 'err')
     if (perm !== 'granted') { btn.disabled = false; renderNotify(); return }
-    return activatePush(p)
+    try {
+      if (!vapidKey) await fetchVapidKey(p)
+      const reg = await navigator.serviceWorker.ready
+      let sub = await reg.pushManager.getSubscription()
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(vapidKey) })
+      }
+      log('Browser subscription made', 'ok')
+      await activatePush(p, sub)
+    } catch (err) {
+      log('Push setup failed: ' + (err && err.message ? err.message : err), 'err')
+      btn.disabled = false
+    }
   })
 }
 
-async function activatePush(p) {
+// Hands Ably the subscription made in the tap. A device that already has a
+// push recipient saved skips Ably's own getting-device-details step (and so
+// its second permission request) and goes straight to registration.
+async function activatePush(p, sub) {
   const btn = $('notifyBtn')
   try {
     log('Registering with Ably…')
+    const device = await client.getDevice()
+    device.push.recipient = {
+      transportType: 'web',
+      targetUrl: btoa(sub.endpoint),
+      publicVapidKey: vapidKey,
+      encryptionKey: { p256dh: bytesToB64(sub.getKey('p256dh')), auth: bytesToB64(sub.getKey('auth')) },
+    }
+    device.persist()
     await client.push.activate()
-    log('Push activated, device ' + client.device().id, 'ok')
+    log('Push activated, device ' + device.id, 'ok')
     // Subscribe the device on the plain channel (no rewind param in the name).
     await client.channels.get(p.ch).push.subscribeDevice()
     log('Subscribed to push on ' + p.ch.slice(0, 14) + '…', 'ok')
@@ -253,6 +301,7 @@ if (pairing) {
   const left = Math.round((tokenExpiry(pairing.t) - Date.now()) / 3600000)
   $('pairText').textContent = 'Paired. Access token valid for ' + (left > 0 ? left + ' more hours.' : 'no longer (expired); scan a new code.')
   connect(pairing)
+  fetchVapidKey(pairing).catch(err => log('Could not fetch the push key: ' + err.message, 'err'))
   $('notifyBtn').onclick = () => turnOnPush(pairing)
 } else {
   $('pairText').textContent = isStandalone
