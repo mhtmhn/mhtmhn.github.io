@@ -1,9 +1,14 @@
-// Claude Status service worker: shows each push as a notification and opens
-// the app when one is tapped.
+// Claude Status service worker: opens each push and shows it as a
+// notification, and opens the app when one is tapped.
 //
-// Every push must show a notification: iOS revokes the permission of a web
-// app that receives one and shows nothing, so even a malformed payload gets
-// a generic one.
+// A push's visible text is generic ("A session needs you"); the real title
+// and body ride sealed, and are opened here with the pairing's key, which
+// never left the phone. Every push shows a notification, the generic one if
+// it cannot be opened: iOS revokes the permission of a web app that receives
+// a push and shows nothing.
+'use strict'
+
+importScripts('crypt.js?v=3')
 
 const APP = '/ccstatus/'
 
@@ -14,43 +19,56 @@ function parse(event) {
   try {
     return event.data ? event.data.json() : {}
   } catch {
-    return { notification: { body: event.data ? event.data.text() : '' } }
+    return {}
   }
 }
 
-self.addEventListener('push', event => {
-  const payload = parse(event)
+async function readable(payload) {
   const n = payload.notification || {}
   const data = payload.data || {}
-  const title = n.title || 'Claude Status'
-  const options = {
-    body: n.body || 'Open the app for details.',
-    icon: APP + 'icons/icon-192.png',
-    badge: APP + 'icons/icon-192.png',
-    // One notification per session and kind: a newer one replaces it.
-    tag: data.tag || 'ccstatus',
-    renotify: true,
-    data,
+  let title = n.title || 'Claude Status'
+  let body = n.body || 'Open the app for details.'
+  try {
+    const pairing = await CCS.get('pairing')
+    if (pairing && data.sealed) {
+      const real = await CCS.open(pairing, data.sealed)
+      if (typeof real.title === 'string') title = real.title
+      if (typeof real.body === 'string') body = real.body
+    }
+  } catch {
+    // A push from before a re-pair, or a damaged one: the generic text stands.
   }
+  return { title, body, tag: typeof data.tag === 'string' ? data.tag : 'ccstatus', session: typeof data.tag === 'string' ? data.tag.replace(/^s-/, '') : '' }
+}
+
+self.addEventListener('push', event => {
   event.waitUntil((async () => {
-    await self.registration.showNotification(title, options)
-    // An open app learns of the push too, and refreshes at once.
+    const shown = await readable(parse(event))
+    await self.registration.showNotification(shown.title, {
+      body: shown.body,
+      icon: APP + 'icons/icon-192.png',
+      badge: APP + 'icons/icon-192.png',
+      // One notification per session: a newer one replaces it.
+      tag: shown.tag,
+      renotify: true,
+      data: { session: shown.session },
+    })
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-    for (const w of windows) w.postMessage({ type: 'push', title, body: options.body, data })
+    for (const w of windows) w.postMessage({ type: 'push' })
   })())
 })
 
 self.addEventListener('notificationclick', event => {
   event.notification.close()
-  const data = event.notification.data || {}
-  // Only ever open this app, whatever the payload says.
-  const target = new URL(APP + (data.session ? '#s=' + encodeURIComponent(data.session) : ''), self.location.origin).href
+  const session = (event.notification.data || {}).session || ''
+  // Only ever this app, whatever a payload says.
+  const target = new URL(APP + (session ? '#s=' + encodeURIComponent(session) : ''), self.location.origin).href
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     for (const w of windows) {
       if (new URL(w.url).pathname.startsWith(APP)) {
         await w.focus()
-        w.postMessage({ type: 'open', data })
+        w.postMessage({ type: 'open', session })
         return
       }
     }

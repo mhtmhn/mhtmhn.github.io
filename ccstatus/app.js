@@ -1,91 +1,105 @@
-// Claude Status, phase 1: pair from a link, install, turn on push, and log
-// what arrives. The pairing link is https://mohitmohan.com/ccstatus/#<id>.<jwt>:
-// the channel is status:<id>, and <jwt> an Ably token the laptop signed for
-// that channel alone. The part after # never leaves the phone (browsers do
-// not send it to the server).
+// Claude Status: the live state of your Claude Code sessions, and a
+// notification when one needs you or is done.
+//
+// Pairing comes from the link /ccstatus shows as a QR (see crypt.js). The
+// phone's Ably token comes from the token service, renewed with the
+// pairing's phone secret; that token may only listen on its one channel and
+// register this device for push there. Every message is sealed by the
+// laptop; the page opens it with the pairing's key.
 'use strict'
 
-const VERSION = 'p1.3'
-// Ably's REST endpoint, as ably-js 2.x names its primary host.
+const VERSION = '3.1'
+const WORKER = 'https://claude-status.mohitsandroid.workers.dev'
 const ABLY_REST = 'https://main.realtime.ably.net'
+const COOKIE = 'ccstatus_pair'
+// A session that has not reported for this long is shown as gone.
+const STALE_MS = 3 * 60_000
+
+const COLORS = { idle: '#3fb950', running: '#2f81f7', attention: '#f0a020', background: '#a371f7', error: '#f85149', starting: '#8b949e', ended: '#6e7681' }
+const KINDS = { think: '#a371f7', reply: '#3fb950', read: '#2f81f7', search: '#39c5cf', write: '#f0a020', run: '#db61a2', web: '#39c5cf', delegate: '#a371f7', plan: '#8b949e', ask: '#f0a020', tool: '#8b949e' }
+
 const $ = id => document.getElementById(id)
-const STORE = 'ccstatus.pairing'
-const COOKIE = 'ccstatus_pairing'
-
-function log(text, kind) {
-  const li = document.createElement('li')
-  li.textContent = new Date().toLocaleTimeString() + '  ' + text
-  if (kind) li.className = kind
-  $('log').prepend(li)
-}
-
-// ---------------------------------------------------------------- platform
-
 const ua = navigator.userAgent
 const isIOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
 const hasPush = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
 
+// ---------------------------------------------------------------- diagnostics
+
+const logLines = []
+function log(text) {
+  logLines.push(new Date().toLocaleTimeString() + '  ' + text)
+  if (logLines.length > 200) logLines.shift()
+  if (!$('diag').hidden) renderLog()
+}
+function renderLog() {
+  const ol = $('log')
+  ol.textContent = ''
+  for (const line of logLines.slice().reverse()) {
+    const li = document.createElement('li')
+    li.textContent = line
+    ol.append(li)
+  }
+}
+let taps = 0, tapTimer = 0
+$('version').textContent = 'v' + VERSION
+$('version').onclick = () => {
+  clearTimeout(tapTimer)
+  tapTimer = setTimeout(() => { taps = 0 }, 1500)
+  if (++taps >= 5) { taps = 0; $('diag').hidden = !$('diag').hidden; renderLog() }
+}
+window.addEventListener('error', e => log('error: ' + e.message))
+window.addEventListener('unhandledrejection', e => log('error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)))
+
+function problem(text) {
+  $('problem').textContent = text || ''
+  $('problem').hidden = !text
+}
+
 // ---------------------------------------------------------------- pairing
 
-function b64urlDecode(s) {
-  s = s.replace(/-/g, '+').replace(/_/g, '/')
-  return decodeURIComponent(escape(atob(s + '==='.slice((s.length + 3) % 4))))
-}
-
-function validPairing(p) {
-  return p && p.v === 1 && typeof p.ch === 'string' && /^status:[A-Za-z0-9_-]{16,64}$/.test(p.ch) && typeof p.t === 'string' && p.t.length < 4096
-}
-
-// The token's own expiry, read from the JWT payload (not verified here: Ably
-// verifies it; this only decides when to ask for a fresh one).
-function tokenExpiry(t) {
-  try { return JSON.parse(b64urlDecode(t.split('.')[1])).exp * 1000 } catch { return 0 }
-}
-
-function savePairing(p) {
-  const text = JSON.stringify(p)
-  localStorage.setItem(STORE, text)
-  // iOS copies cookies, and only cookies, into the app added to the Home
-  // Screen: this is how a pairing made in Safari reaches the installed app.
-  const days = 2
-  document.cookie = `${COOKIE}=${encodeURIComponent(text)}; Max-Age=${days * 86400}; Path=/ccstatus/; Secure; SameSite=Strict`
-}
-
-function loadPairing() {
-  const fromHash = location.hash.slice(1)
-  if (fromHash) {
+// The link's pairing, kept in IndexedDB (the service worker reads it) and,
+// on iOS, in a cookie: adding to the Home Screen copies cookies alone into
+// the installed app, so that is how a pairing made in Safari gets there.
+async function loadPairing() {
+  const fromLink = CCS.parseLink(location.hash)
+  if (location.hash) history.replaceState(null, '', location.pathname)
+  if (fromLink) {
+    await CCS.set('pairing', fromLink)
+    document.cookie = `${COOKIE}=${encodeURIComponent(JSON.stringify(fromLink))}; Max-Age=${2 * 86400}; Path=/ccstatus/; Secure; SameSite=Strict`
+    log('paired from the link')
+    return fromLink
+  }
+  const saved = await CCS.get('pairing').catch(() => null)
+  if (saved) return saved
+  const c = document.cookie.split('; ').find(x => x.startsWith(COOKIE + '='))
+  if (c) {
     try {
-      const dot = fromHash.indexOf('.')
-      const p = { v: 1, ch: 'status:' + fromHash.slice(0, dot), t: fromHash.slice(dot + 1) }
-      if (dot > 0 && validPairing(p)) {
-        savePairing(p)
-        log('Paired from the link', 'ok')
-      } else {
-        log('The pairing link is not valid', 'err')
+      const p = JSON.parse(decodeURIComponent(c.slice(COOKIE.length + 1)))
+      if (p && p.channel && p.secret && p.key) {
+        await CCS.set('pairing', p)
+        log('pairing carried over from Safari')
+        return p
       }
-    } catch {
-      log('The pairing link could not be read', 'err')
-    }
-    // Drop the token from the address bar and the history.
-    history.replaceState(null, '', location.pathname)
+    } catch {}
   }
-  let text = localStorage.getItem(STORE)
-  if (!text) {
-    const c = document.cookie.split('; ').find(x => x.startsWith(COOKIE + '='))
-    if (c) {
-      text = decodeURIComponent(c.slice(COOKIE.length + 1))
-      localStorage.setItem(STORE, text)
-      log('Pairing carried over from Safari', 'ok')
-    }
-  }
-  try {
-    const p = JSON.parse(text || 'null')
-    return validPairing(p) ? p : null
-  } catch {
-    return null
-  }
+  return null
 }
+
+async function unpair() {
+  if (!confirm('Unpair this phone? It stops showing status and notifications until you scan a new code.')) return
+  try { await client?.push.deactivate() } catch {}
+  try {
+    const reg = await navigator.serviceWorker.ready
+    const sub = await reg.pushManager.getSubscription()
+    await sub?.unsubscribe()
+  } catch {}
+  await CCS.set('pairing', undefined)
+  localStorage.clear()
+  document.cookie = `${COOKIE}=; Max-Age=0; Path=/ccstatus/; Secure; SameSite=Strict`
+  location.reload()
+}
+$('unpair').onclick = unpair
 
 // ---------------------------------------------------------------- install sheet
 
@@ -95,21 +109,17 @@ function chip(icon, label) {
   s.textContent = (icon ? icon + ' ' : '') + label
   return s
 }
-
 function step(...parts) {
   const li = document.createElement('li')
-  for (const p of parts) li.append(typeof p === 'string' ? p : p)
+  li.append(...parts)
   return li
 }
-
 let deferredInstall = null
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault()
   deferredInstall = e
-  // iOS has no install prompt: the steps are the only way there.
   $('installBtn').hidden = isIOS
 })
-
 function showSheet() {
   if (isStandalone || sessionStorage.getItem('sheetClosed')) return
   const steps = $('steps')
@@ -132,8 +142,7 @@ $('sheetClose').onclick = () => { $('sheet').hidden = true; sessionStorage.setIt
 $('installBtn').onclick = async () => {
   if (!deferredInstall) return
   deferredInstall.prompt()
-  const { outcome } = await deferredInstall.userChoice
-  log('Install: ' + outcome)
+  await deferredInstall.userChoice
   deferredInstall = null
   $('installBtn').hidden = true
 }
@@ -141,176 +150,238 @@ $('installBtn').onclick = async () => {
 // ---------------------------------------------------------------- Ably
 
 let client = null
+let pairing = null
+let currentToken = null
 
-function connect(p) {
+// The phone's token, from the token service.
+async function fetchToken() {
+  const res = await fetch(WORKER + '/renew', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel: pairing.channel, secret: pairing.secret, role: 'phone' }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 403) throw Object.assign(new Error('This phone is no longer paired. Scan a new code from /ccstatus.'), { unpaired: true })
+  if (!res.ok || !body.phone) throw new Error(body.error || 'The token service answered ' + res.status)
+  currentToken = body.phone.token
+  return body.phone.token
+}
+
+const sessions = new Map()
+
+function connect() {
   client = new Ably.Realtime({
-    token: p.t,
+    authCallback: (_params, cb) => {
+      fetchToken().then(t => cb(null, t), err => {
+        if (err.unpaired) problem(err.message)
+        log('token: ' + err.message)
+        cb(err.message, null)
+      })
+    },
     plugins: { Push: AblyPushPlugin },
     pushServiceWorkerUrl: '/ccstatus/sw.js',
-    // The phone never publishes; it only listens.
     echoMessages: false,
   })
   client.connection.on(change => {
-    log('Ably: ' + change.current + (change.reason ? ' (' + change.reason.message + ')' : ''), change.current === 'failed' ? 'err' : '')
+    log('ably: ' + change.current + (change.reason ? ' (' + change.reason.message + ')' : ''))
+    $('conn').className = 'conn ' + (change.current === 'connected' ? 'on' : change.current === 'connecting' ? '' : 'off')
   })
-  // The live channel, rewound by one: the latest status shows at once.
-  const channel = client.channels.get(p.ch, { params: { rewind: '1' } })
-  channel.subscribe(msg => log('Message: ' + msg.name + ' ' + JSON.stringify(msg.data).slice(0, 160)))
-  return channel
+  // Rewound a little: each session's newest state arrives at once.
+  const channel = client.channels.get(pairing.channel, { params: { rewind: '10' } })
+  channel.subscribe('state', async msg => {
+    try {
+      const s = await CCS.open(pairing, msg.data)
+      if (!s || !s.session) return
+      // Messages arrive in the order each session sent them: the newest wins.
+      // Ably's own timestamp, so a rewound state from hours ago is not shown as live.
+      s.receivedAt = Math.min(msg.timestamp || Date.now(), Date.now())
+      sessions.set(s.session, s)
+      render()
+    } catch (err) {
+      log('could not open a message: ' + err.message)
+    }
+  })
 }
 
-// iOS only shows the permission prompt for a request made in the tap
-// itself, and answers "denied" to any later request made outside one, even
-// after the person tapped Allow. Ably's own activate() asks for permission
-// again after a network round trip, so on iOS it always failed. Here the
-// whole browser half of web push runs from the tap, and Ably is handed the
-// finished subscription (activatePush): it never asks.
+// ---------------------------------------------------------------- push
 
 function urlB64ToBytes(s) {
   const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4))
   return Uint8Array.from(b, c => c.charCodeAt(0))
 }
-
 function bytesToB64(buf) {
   return btoa(String.fromCharCode(...new Uint8Array(buf)))
 }
 
-// The VAPID public key Ably made for this app, fetched before any tap so the
-// tap has nothing to wait for. Any valid token may read it.
+// The VAPID key Ably made for this app, fetched before any tap so the tap has
+// nothing to wait for.
 let vapidKey = null
-async function fetchVapidKey(p) {
-  const res = await fetch(ABLY_REST + '/push/publicVapidKey', {
-    headers: { authorization: 'Bearer ' + btoa(p.t), accept: 'text/plain' },
-  })
-  if (!res.ok) throw new Error('VAPID key: HTTP ' + res.status)
+async function fetchVapidKey() {
+  const token = currentToken || await fetchToken()
+  const res = await fetch(ABLY_REST + '/push/publicVapidKey', { headers: { authorization: 'Bearer ' + btoa(token), accept: 'text/plain' } })
+  if (!res.ok) throw new Error('push key: HTTP ' + res.status)
   vapidKey = (await res.text()).trim().replace(/^"|"$/g, '')
 }
 
-function turnOnPush(p) {
+// iOS shows the permission prompt only for a request made in the tap itself,
+// and answers "denied" to a later one even after Allow. So the browser half
+// of web push runs here, from the tap, and Ably is handed the subscription
+// already made: its own activate() then never asks.
+function turnOnPush() {
   const btn = $('notifyBtn')
   btn.disabled = true
-  log('Asking for notification permission…')
   let asked
   try {
     asked = Notification.requestPermission()
   } catch (err) {
-    log('Permission request failed: ' + err.message, 'err')
+    log('permission: ' + err.message)
     btn.disabled = false
     return
   }
   Promise.resolve(asked).then(async perm => {
-    log('Permission: ' + perm, perm === 'granted' ? 'ok' : 'err')
+    log('permission: ' + perm)
     if (perm !== 'granted') { btn.disabled = false; renderNotify(); return }
     try {
-      if (!vapidKey) await fetchVapidKey(p)
+      if (!vapidKey) await fetchVapidKey()
       const reg = await navigator.serviceWorker.ready
       let sub = await reg.pushManager.getSubscription()
-      if (!sub) {
-        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(vapidKey) })
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(vapidKey) })
+      const device = await client.getDevice()
+      device.push.recipient = {
+        transportType: 'web',
+        targetUrl: btoa(sub.endpoint),
+        publicVapidKey: vapidKey,
+        encryptionKey: { p256dh: bytesToB64(sub.getKey('p256dh')), auth: bytesToB64(sub.getKey('auth')) },
       }
-      log('Browser subscription made', 'ok')
-      await activatePush(p, sub)
+      device.persist()
+      await client.push.activate()
+      await client.channels.get(pairing.channel).push.subscribeDevice()
+      localStorage.setItem('ccstatus.push', pairing.channel)
+      log('push on, device ' + device.id)
+      renderNotify()
     } catch (err) {
-      log('Push setup failed: ' + (err && err.message ? err.message : err), 'err')
+      log('push setup: ' + (err && err.message ? err.message : err))
+      problem('Could not turn on notifications. Try again in a moment.')
       btn.disabled = false
     }
   })
 }
-
-// Hands Ably the subscription made in the tap. A device that already has a
-// push recipient saved skips Ably's own getting-device-details step (and so
-// its second permission request) and goes straight to registration.
-async function activatePush(p, sub) {
-  const btn = $('notifyBtn')
-  try {
-    log('Registering with Ably…')
-    const device = await client.getDevice()
-    device.push.recipient = {
-      transportType: 'web',
-      targetUrl: btoa(sub.endpoint),
-      publicVapidKey: vapidKey,
-      encryptionKey: { p256dh: bytesToB64(sub.getKey('p256dh')), auth: bytesToB64(sub.getKey('auth')) },
-    }
-    device.persist()
-    await client.push.activate()
-    log('Push activated, device ' + device.id, 'ok')
-    // Subscribe the device on the plain channel (no rewind param in the name).
-    await client.channels.get(p.ch).push.subscribeDevice()
-    log('Subscribed to push on ' + p.ch.slice(0, 14) + '…', 'ok')
-    localStorage.setItem('ccstatus.push', 'on')
-    renderNotify()
-  } catch (err) {
-    log('Push failed: ' + (err && err.message ? err.message : err), 'err')
-    btn.disabled = false
-  }
-}
+$('notifyBtn').onclick = turnOnPush
 
 function renderNotify() {
-  const btn = $('notifyBtn')
-  const text = $('notifyText')
-  if (!pairing) {
-    text.textContent = 'Pair first: scan the QR code /status-web shows in Claude Code, from inside this app.'
-    btn.hidden = true
-    return
-  }
-  if (!hasPush) {
-    text.textContent = isIOS && !isStandalone
-      ? 'Install the app (Share → Add to Home Screen), then open it to turn on notifications.'
-      : 'This browser has no push support.'
-    btn.hidden = true
-    return
-  }
-  if (isIOS && !isStandalone) {
-    text.textContent = 'On iPhone, notifications only work in the installed app. Install it, then open it from the Home Screen.'
-    btn.hidden = true
+  const box = $('notify'), btn = $('notifyBtn'), text = $('notifyText')
+  box.hidden = false
+  btn.hidden = true
+  if (!pairing) { box.hidden = true; return }
+  if (!hasPush || (isIOS && !isStandalone)) {
+    text.textContent = isIOS ? 'Add this page to your Home Screen (Share → Add to Home Screen) and open it from there to get notifications.' : 'This browser cannot show notifications.'
     return
   }
   const perm = Notification.permission
-  if (perm === 'granted' && localStorage.getItem('ccstatus.push') === 'on') {
-    text.textContent = 'Notifications are on.'
-    btn.hidden = true
+  if (perm === 'granted' && localStorage.getItem('ccstatus.push') === pairing.channel) {
+    box.hidden = true
   } else if (perm === 'denied') {
-    text.textContent = 'Notifications are blocked. Allow them for this app in Settings, then reopen it.'
-    btn.hidden = true
+    text.textContent = 'Notifications are off for this app. Turn them on in Settings → Notifications → CC Status, then reopen the app.'
   } else {
-    text.textContent = 'Tap to allow notifications when a session needs you or is done.'
+    text.textContent = 'Get a notification when a session needs you or is done.'
     btn.hidden = false
     btn.disabled = false
   }
 }
 
-// ---------------------------------------------------------------- start
+// ---------------------------------------------------------------- the view
 
-// Nothing fails silently: every error lands in the log.
-window.addEventListener('error', e => log('Error: ' + e.message, 'err'))
-window.addEventListener('unhandledrejection', e => log('Error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason), 'err'))
+function ago(ms) {
+  const s = Math.max(0, Math.round(ms / 1000))
+  return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm' : Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm'
+}
+
+function isLive(s) {
+  return s.status !== 'ended' && Date.now() - s.receivedAt < STALE_MS
+}
+
+function pick(list) {
+  const want = new URLSearchParams(location.hash.slice(1)).get('s') || sessionStorage.getItem('follow')
+  return list.find(x => x.session === want) ||
+    list.find(x => x.status === 'attention' || x.status === 'error') ||
+    list.find(x => x.status === 'running') || list[0]
+}
+
+function render() {
+  const list = [...sessions.values()].filter(isLive).sort((a, b) => a.project.localeCompare(b.project) || a.session.localeCompare(b.session))
+  const selected = pick(list)
+  $('empty').hidden = !pairing || list.length > 0
+  $('view').hidden = !selected
+
+  const nav = $('list')
+  nav.textContent = ''
+  if (list.length > 1) {
+    for (const x of list) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'row ' + x.status + (x === selected ? ' sel' : '')
+      b.style.setProperty('--rc', COLORS[x.status] || '#8b949e')
+      const dot = document.createElement('span'); dot.className = 'rd'
+      const name = document.createElement('span'); name.className = 'rp'; name.textContent = x.project || 'Session'
+      const label = document.createElement('span'); label.className = 'rl'; label.textContent = x.label
+      b.append(dot, name, label)
+      b.onclick = () => { sessionStorage.setItem('follow', x.session); render() }
+      nav.append(b)
+    }
+  }
+  if (!selected) { document.body.className = 'idle'; return }
+
+  const c = COLORS[selected.status] || '#8b949e'
+  document.body.className = selected.status
+  document.documentElement.style.setProperty('--c', c)
+  $('label').textContent = selected.label
+  $('meta').textContent = (selected.project || 'Session') + (selected.since ? ' · for ' + ago(Date.now() - selected.since) : '')
+  $('detail').textContent = selected.detail || ''
+
+  const a = selected.activity
+  const sameVerb = a && a.verb === selected.label
+  $('pill').hidden = !a || (sameVerb && !a.target)
+  if (a) {
+    $('pill').style.setProperty('--k', KINDS[a.kind] || '#8b949e')
+    $('pic').textContent = a.icon
+    $('pverb').textContent = sameVerb ? '' : a.verb
+    $('ptgt').textContent = a.target || ''
+  }
+
+  const sm = selected.summary
+  $('summary').hidden = !sm || sm.state === 'failed'
+  if (sm) {
+    $('summary').className = 'card ' + sm.state
+    $('stext').textContent = sm.state === 'pending' ? 'Writing the action items…' : sm.text
+  }
+  document.title = selected.label + ' · Claude Status'
+}
+setInterval(render, 5000)
 
 navigator.serviceWorker?.addEventListener('message', e => {
-  if (e.data && e.data.type === 'push') log('Push received: ' + e.data.title + ' / ' + e.data.body, 'ok')
+  if (e.data && e.data.type === 'open' && e.data.session) { sessionStorage.setItem('follow', e.data.session); render() }
 })
 
-const pairing = loadPairing()
-$('sub').textContent = (isStandalone ? 'Installed app' : 'In the browser') + ' · ' + VERSION
-// The worker registered up front, so the tap has nothing to wait for.
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/ccstatus/sw.js', { scope: '/ccstatus/' })
-    .then(() => log('Service worker ready'))
-    .catch(err => log('Service worker failed: ' + err.message, 'err'))
-}
-if (pairing) {
-  const left = Math.round((tokenExpiry(pairing.t) - Date.now()) / 3600000)
-  $('pairText').textContent = 'Paired. Access token valid for ' + (left > 0 ? left + ' more hours.' : 'no longer (expired); scan a new code.')
-  connect(pairing)
-  fetchVapidKey(pairing).catch(err => log('Could not fetch the push key: ' + err.message, 'err'))
-  $('notifyBtn').onclick = () => turnOnPush(pairing)
-} else {
-  $('pairText').textContent = isStandalone
-    ? 'Not paired in this app. The pairing from Safari did not carry over: scan the QR code again with the Camera, then reopen this app.'
-    : 'Not paired. Scan the QR code /status-web shows in Claude Code.'
-  log('No pairing found (cookie ' + (document.cookie.includes(COOKIE + '=') ? 'present' : 'absent') + ')', 'err')
-}
-renderNotify()
-showSheet()
-// iOS offers push to the installed app alone.
-const canPush = hasPush && !(isIOS && !isStandalone)
-log('Ready: ' + (isIOS ? 'iOS' : 'other') + ', ' + (isStandalone ? 'installed' : 'browser') + ', push ' + (canPush ? 'available' : 'unavailable here'))
+// ---------------------------------------------------------------- start
+
+;(async () => {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/ccstatus/sw.js', { scope: '/ccstatus/' }).catch(err => log('service worker: ' + err.message))
+  }
+  pairing = await loadPairing()
+  const follow = new URLSearchParams(location.hash.slice(1)).get('s')
+  if (follow) sessionStorage.setItem('follow', follow)
+  log('start: ' + (isIOS ? 'iOS' : 'other') + ', ' + (isStandalone ? 'installed' : 'browser') + ', ' + (pairing ? 'paired' : 'not paired'))
+  if (!pairing) {
+    $('welcome').hidden = false
+    if (isStandalone && isIOS) {
+      $('welcome').querySelector('p').textContent = 'Scan the QR code /ccstatus shows with the Camera, open it in Safari, then reopen this app.'
+    }
+  } else {
+    connect()
+    fetchVapidKey().catch(err => log('push key: ' + err.message))
+  }
+  renderNotify()
+  render()
+  showSheet()
+})()
