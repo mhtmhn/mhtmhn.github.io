@@ -8,7 +8,7 @@
 // laptop; the page opens it with the pairing's key.
 'use strict'
 
-const VERSION = '3.2'
+const VERSION = '3.3'
 const WORKER = 'https://claude-status.mohitsandroid.workers.dev'
 const ABLY_REST = 'https://main.realtime.ably.net'
 const COOKIE = 'ccstatus_pair'
