@@ -5,6 +5,7 @@
 // not send it to the server).
 'use strict'
 
+const VERSION = 'p1.2'
 const $ = id => document.getElementById(id)
 const STORE = 'ccstatus.pairing'
 const COOKIE = 'ccstatus_pairing'
@@ -156,11 +157,33 @@ function connect(p) {
   return channel
 }
 
-async function turnOnPush(p) {
+// iOS only shows the permission prompt for a request made in the tap
+// itself: Notification.requestPermission() is the first thing this does,
+// before any await. Ably's activate() asks again later, which then resolves
+// at once with the answer already given.
+function turnOnPush(p) {
   const btn = $('notifyBtn')
   btn.disabled = true
+  log('Asking for notification permission…')
+  let asked
   try {
-    log('Asking for notification permission…')
+    asked = Notification.requestPermission()
+  } catch (err) {
+    log('Permission request failed: ' + err.message, 'err')
+    btn.disabled = false
+    return
+  }
+  Promise.resolve(asked).then(perm => {
+    log('Permission: ' + perm, perm === 'granted' ? 'ok' : 'err')
+    if (perm !== 'granted') { btn.disabled = false; renderNotify(); return }
+    return activatePush(p)
+  })
+}
+
+async function activatePush(p) {
+  const btn = $('notifyBtn')
+  try {
+    log('Registering with Ably…')
     await client.push.activate()
     log('Push activated, device ' + client.device().id, 'ok')
     // Subscribe the device on the plain channel (no rewind param in the name).
@@ -177,6 +200,11 @@ async function turnOnPush(p) {
 function renderNotify() {
   const btn = $('notifyBtn')
   const text = $('notifyText')
+  if (!pairing) {
+    text.textContent = 'Pair first: scan the QR code /status-web shows in Claude Code, from inside this app.'
+    btn.hidden = true
+    return
+  }
   if (!hasPush) {
     text.textContent = isIOS && !isStandalone
       ? 'Install the app (Share → Add to Home Screen), then open it to turn on notifications.'
@@ -205,19 +233,32 @@ function renderNotify() {
 
 // ---------------------------------------------------------------- start
 
+// Nothing fails silently: every error lands in the log.
+window.addEventListener('error', e => log('Error: ' + e.message, 'err'))
+window.addEventListener('unhandledrejection', e => log('Error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason), 'err'))
+
 navigator.serviceWorker?.addEventListener('message', e => {
   if (e.data && e.data.type === 'push') log('Push received: ' + e.data.title + ' / ' + e.data.body, 'ok')
 })
 
 const pairing = loadPairing()
-$('sub').textContent = isStandalone ? 'Installed app' : 'In the browser'
+$('sub').textContent = (isStandalone ? 'Installed app' : 'In the browser') + ' · ' + VERSION
+// The worker registered up front, so the tap has nothing to wait for.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/ccstatus/sw.js', { scope: '/ccstatus/' })
+    .then(() => log('Service worker ready'))
+    .catch(err => log('Service worker failed: ' + err.message, 'err'))
+}
 if (pairing) {
   const left = Math.round((tokenExpiry(pairing.t) - Date.now()) / 3600000)
   $('pairText').textContent = 'Paired. Access token valid for ' + (left > 0 ? left + ' more hours.' : 'no longer (expired); scan a new code.')
   connect(pairing)
   $('notifyBtn').onclick = () => turnOnPush(pairing)
 } else {
-  $('pairText').textContent = 'Not paired. Scan the QR code /status-web shows in Claude Code.'
+  $('pairText').textContent = isStandalone
+    ? 'Not paired in this app. The pairing from Safari did not carry over: scan the QR code again with the Camera, then reopen this app.'
+    : 'Not paired. Scan the QR code /status-web shows in Claude Code.'
+  log('No pairing found (cookie ' + (document.cookie.includes(COOKIE + '=') ? 'present' : 'absent') + ')', 'err')
 }
 renderNotify()
 showSheet()
