@@ -8,7 +8,7 @@
 // laptop; the page opens it with the pairing's key.
 'use strict'
 
-const VERSION = '3.1'
+const VERSION = '3.2'
 const WORKER = 'https://claude-status.mohitsandroid.workers.dev'
 const ABLY_REST = 'https://main.realtime.ably.net'
 const COOKIE = 'ccstatus_pair'
@@ -103,10 +103,30 @@ $('unpair').onclick = unpair
 
 // ---------------------------------------------------------------- install sheet
 
+// After khmyznikov/pwa-install's per-browser steps (MIT, see icons.js).
+const nav = {
+  iosNonSafari: /CriOS|EdgiOS|FxiOS|OPiOS|OPT\/|Ddg|YaBrowser/.test(ua),
+  inApp: /FBAN|FBAV|Instagram|Line\/|LinkedInApp|Twitter|MicroMessenger|GSA\//.test(ua),
+  edge: /Edg(e|A|iOS)?\//.test(ua),
+  firefox: /Firefox\/|FxiOS/.test(ua),
+  opera: /OPR\/|OPT\/|OPiOS/.test(ua),
+  android: /Android/i.test(ua),
+  // iOS 26 moved Share into a menu behind the address bar, then "View More".
+  ios26: typeof CSS !== 'undefined' && CSS.supports('text-wrap', 'pretty'),
+  // iOS 27 draws that menu as three lines instead of three dots.
+  ios27: typeof CSS !== 'undefined' && CSS.supports('background', 'revert-rule'),
+}
+
 function chip(icon, label) {
   const s = document.createElement('span')
   s.className = 'chip'
-  s.textContent = (icon ? icon + ' ' : '') + label
+  if (icon) {
+    const i = document.createElement('span')
+    i.className = 'ci'
+    i.innerHTML = ICONS[icon]
+    s.append(i)
+  }
+  if (label) s.append(label)
   return s
 }
 function step(...parts) {
@@ -118,24 +138,35 @@ let deferredInstall = null
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault()
   deferredInstall = e
-  $('installBtn').hidden = isIOS
+  $('installBtn').hidden = false
 })
+
+function iosSteps() {
+  if (nav.inApp) return [step('Open this page in ', chip('', 'Safari'), ': this app\'s browser cannot install it')]
+  const out = []
+  const menu = nav.ios26 && (!nav.iosNonSafari || nav.edge || nav.opera)
+  if (menu) out.push(step('Tap ', chip(nav.ios27 && !nav.opera ? 'menu' : 'dots'), ' in the address bar'))
+  out.push(step('Tap ', chip('share', 'Share')))
+  if (nav.ios26) out.push(step('Tap ', chip('viewMore', 'View More')))
+  out.push(step('Tap ', chip('addHome', 'Add to Home Screen')))
+  out.push(step('Open ', chip('', 'CC Status'), ' from your Home Screen'))
+  return out
+}
+function otherSteps() {
+  const open = step('Open ', chip('', 'CC Status'), ' from your ' + (nav.android ? 'home screen' : 'apps'))
+  if (nav.android) {
+    if (nav.firefox) return [step('Tap ', chip('kebab'), ' in the toolbar'), step('Tap ', chip('', 'Add app to Home screen')), open]
+    return [step('Tap ', chip('', 'Install'), ' below, or ', chip('kebab'), ' → ', chip('', 'Add to Home screen')), open]
+  }
+  // Desktop: the install button sits at the right of the address bar.
+  if (nav.firefox) return [step('Click ', chip('firefoxInstall'), ' at the right of the address bar'), open]
+  if (nav.edge) return [step('Click ', chip('edgeInstall'), ' at the right of the address bar'), open]
+  return [step('Click ', chip('chromeInstall'), ' at the right of the address bar'), open]
+}
 function showSheet() {
   if (isStandalone || sessionStorage.getItem('sheetClosed')) return
-  const steps = $('steps')
-  steps.textContent = ''
-  if (isIOS) {
-    steps.append(
-      step('Tap ', chip('⬆︎', 'Share'), ' in the browser bar'),
-      step('Scroll and tap ', chip('⊞', 'Add to Home Screen')),
-      step('Open ', chip('', 'CC Status'), ' from your Home Screen'),
-    )
-  } else {
-    steps.append(
-      step('Tap ', chip('', 'Install'), ' below, or ', chip('⋮', 'menu'), ' → ', chip('', 'Install app')),
-      step('Open ', chip('', 'CC Status'), ' from your home screen'),
-    )
-  }
+  $('steps').replaceChildren(...(isIOS ? iosSteps() : otherSteps()))
+  $('installBtn').hidden = !deferredInstall
   $('sheet').hidden = false
 }
 $('sheetClose').onclick = () => { $('sheet').hidden = true; sessionStorage.setItem('sheetClosed', '1') }
