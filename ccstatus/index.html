@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; connect-src https://*.ably.io https://*.ably.net https://*.ably-realtime.com wss://*.ably.io wss://*.ably.net wss://*.ably-realtime.com; base-uri 'none'; form-action 'none'">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CC Status">
+<title>Claude Status</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-32.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<main id="app">
+  <header>
+    <img src="icons/icon-192.png" alt="" class="logo">
+    <div>
+      <h1>Claude Status</h1>
+      <p class="dim" id="sub">Phase 1 test</p>
+    </div>
+  </header>
+
+  <section class="card" id="pairing">
+    <h2>Pairing</h2>
+    <p id="pairText" class="dim">Not paired.</p>
+  </section>
+
+  <section class="card" id="notify">
+    <h2>Notifications</h2>
+    <p id="notifyText" class="dim">Install the app first, then turn notifications on here.</p>
+    <button id="notifyBtn" type="button" class="primary" hidden>Turn on notifications</button>
+  </section>
+
+  <section class="card">
+    <h2>Log</h2>
+    <ol id="log"></ol>
+  </section>
+</main>
+
+<!-- The install sheet: iOS has no install API, so it shows the steps. -->
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-body" role="dialog" aria-labelledby="sheetTitle">
+    <div class="sheet-head">
+      <h2 id="sheetTitle">Install the app</h2>
+      <button id="sheetClose" type="button" class="x" aria-label="Close">✕</button>
+    </div>
+    <div class="app-card">
+      <img src="icons/icon-192.png" alt="">
+      <div><b>Claude Status</b><span>mohitmohan.com</span></div>
+    </div>
+    <ol id="steps" class="steps"></ol>
+    <button id="installBtn" type="button" class="primary" hidden>Install</button>
+  </div>
+</div>
+
+<script src="vendor/ably-2.29.0.min.js"></script>
+<script src="vendor/ably-push-2.29.0.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

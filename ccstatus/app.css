@@ -1,0 +1,41 @@
+:root {
+  color-scheme: dark;
+  --bg: #0d1117; --card: #161b22; --line: #30363d; --text: #e6edf3; --dim: #8b949e;
+  --navy: #1d2140; --green: #3ddc84; --accent: #6e7bff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { min-height: 100dvh; padding: max(env(safe-area-inset-top), 1.25rem) 1.25rem max(env(safe-area-inset-bottom), 1.25rem); }
+main { max-width: 30rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }
+header { display: flex; align-items: center; gap: .9rem; padding: .5rem 0; }
+.logo { width: 3rem; height: 3rem; border-radius: 22%; }
+h1 { margin: 0; font-size: 1.5rem; }
+h2 { margin: 0 0 .5rem; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+p { margin: 0; line-height: 1.5; }
+.dim { color: var(--dim); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem 1.1rem; }
+button { font: inherit; cursor: pointer; }
+.primary { margin-top: .8rem; width: 100%; padding: .85rem; border: 0; border-radius: 12px; font-weight: 600; background: var(--green); color: #0b1a10; }
+.primary:disabled { opacity: .5; }
+.primary[hidden] { display: none; }
+#log { margin: 0; padding-left: 1.2rem; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .78rem; color: var(--dim); line-height: 1.5; }
+#log li { overflow-wrap: anywhere; }
+#log .err { color: #f85149; }
+#log .ok { color: var(--green); }
+
+/* Install sheet, after iOS's own share sheet. */
+.sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: flex; align-items: flex-end; z-index: 10; }
+.sheet[hidden] { display: none; }
+.sheet-body { width: 100%; max-width: 34rem; margin: 0 auto; background: #1c1f26; border-radius: 28px 28px 0 0;
+              padding: 1.4rem 1.4rem max(env(safe-area-inset-bottom), 1.4rem); }
+.sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+.sheet-head h2 { margin: 0; font-size: 1.15rem; letter-spacing: 0; text-transform: none; color: var(--text); font-weight: 500; }
+.x { background: none; border: 0; color: var(--text); font-size: 1.3rem; padding: .2rem .5rem; }
+.app-card { display: flex; align-items: center; gap: 1rem; padding: 1rem; border-radius: 18px; background: #2a2d36; margin-bottom: 1.2rem; }
+.app-card img { width: 3.6rem; height: 3.6rem; border-radius: 22%; }
+.app-card b { display: block; font-size: 1.05rem; }
+.app-card span { color: var(--dim); font-size: .9rem; }
+.steps { margin: 0; padding-left: 1.4rem; display: flex; flex-direction: column; gap: 1rem; font-size: 1.02rem; }
+.steps li { padding-left: .3rem; line-height: 1.9; }
+.chip { display: inline-flex; align-items: center; gap: .35rem; padding: .1rem .55rem; border: 1px solid var(--line); border-radius: 8px; background: #23262e; font-weight: 600; font-size: .92rem; white-space: nowrap; }
